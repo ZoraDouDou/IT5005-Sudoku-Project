@@ -12,6 +12,27 @@ def atom(prefix, r, c, v):
     """prefix is 'Is' or 'Not'. Returns the Expr for e.g. Is3_2_4."""
     return expr(f'{prefix}{r}_{c}_{v}')
 
+class IndexedDefiniteKB(PropDefiniteKB):
+    def __init__(self):
+        super().__init__()
+        self._by_premise = {}
+
+    def tell(self, sentence):
+        super().tell(sentence)
+        clause = self.clauses[-1]
+        if clause.op == '==>':
+            for premise in conjuncts(clause.args[0]):
+                if premise not in self._by_premise:
+                    self._by_premise[premise] = []
+                self._by_premise[premise].append(clause)
+
+    def clauses_with_premise(self, p):
+        return self._by_premise.get(p, [])
+
+
+
+
+
 def build_general_kb(n, box_h, box_w, givens):
     """Return a PropKB encoding this n x n Sudoku's constraints plus the given
     cells, as general clauses.
@@ -64,7 +85,7 @@ def build_definite_kb(n, box_h, box_w, givens):
     """Return a PropDefiniteKB encoding this n x n Sudoku's constraints plus
     the given cells, using elimination + last-candidate reasoning.
     """
-    kb = PropDefiniteKB()
+    kb = IndexedDefiniteKB()   # was: kb = PropDefiniteKB()
     cells = [(r, c) for r in range(1, n + 1) for c in range(1, n + 1)]
 
     def peers_of(r, c):
@@ -172,6 +193,24 @@ def pl_bc_entails(kb, query):
         True if kb entails query, False otherwise.
     """
 
+    # Build a conclusion index once per kb, cached on the kb object
+    # itself, so repeated calls with the same kb don't rebuild it.
+    # This is our own function (not logic_.py), so we're free to
+    # change how it looks things up internally.
+    if not hasattr(kb, "_by_conclusion"):
+        by_conclusion = {}
+        facts = set()
+        for clause in kb.clauses:
+            if clause.op == '==>':
+                conclusion = clause.args[1]
+                if conclusion not in by_conclusion:
+                    by_conclusion[conclusion] = []
+                by_conclusion[conclusion].append(clause)
+            elif is_symbol(clause.op):
+                facts.add(clause)
+        kb._by_conclusion = by_conclusion
+        kb._facts = facts
+
     # Permanent memory — only ever holds proven-True facts, and is
     # kept across every retry round below
     permanent_cache = {}
@@ -189,22 +228,15 @@ def pl_bc_entails(kb, query):
             return False
 
         visiting.add(q)
-        result = False
-
-        for clause in kb.clauses:
-            if is_symbol(clause.op) and clause == q:
-                result = True
-                break
+        result = q in kb._facts
 
         if not result:
-            for clause in kb.clauses:
-                if clause.op == '==>':
-                    premise, conclusion = clause.args
-                    if conclusion == q:
-                        premises = conjuncts(premise)
-                        if all(bc_once(p, visiting, round_memo) for p in premises):
-                            result = True
-                            break
+            for clause in kb._by_conclusion.get(q, []):
+                premise, conclusion = clause.args
+                premises = conjuncts(premise)
+                if all(bc_once(p, visiting, round_memo) for p in premises):
+                    result = True
+                    break
 
         visiting.discard(q)
         round_memo[q] = result
